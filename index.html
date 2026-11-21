@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Météo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+:root{color-scheme:dark;--p:2px}
+html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
+#w{position:relative;width:100%;height:100%;border-radius:calc(var(--p)*4);overflow:hidden;font-family:"Press Start 2P",ui-monospace,monospace;color:#fff;-webkit-font-smoothing:none;user-select:none}
+canvas#c{position:absolute;inset:0;width:100%;height:100%;image-rendering:pixelated}
+.txt{position:absolute;text-shadow:var(--p) var(--p) 0 rgba(0,0,0,.55),0 0 calc(var(--p)*3) rgba(0,0,0,.35);line-height:1.2;pointer-events:none;transition:opacity .35s steps(4)}
+#tl{left:calc(var(--p)*5);top:calc(var(--p)*5)}
+#city{font-size:calc(var(--p)*5.2)}
+#date{font-size:calc(var(--p)*3.5);opacity:.85;margin-top:calc(var(--p)*2.2)}
+#tr{right:calc(var(--p)*5);top:calc(var(--p)*5);text-align:right}
+#temp{font-size:calc(var(--p)*11)}
+#cond{font-size:calc(var(--p)*4);margin-top:calc(var(--p)*2.6)}
+#feels{font-size:calc(var(--p)*3.3);opacity:.8;margin-top:calc(var(--p)*1.8)}
+#tick{left:calc(var(--p)*5);bottom:calc(var(--p)*4.5);font-size:calc(var(--p)*3.6);transition:opacity .3s steps(3)}
+#week{position:absolute;inset:0;background:rgba(9,11,24,.8);display:flex;flex-direction:column;justify-content:center;padding:0 calc(var(--p)*5);opacity:0;transform:translateY(calc(var(--p)*4));transition:opacity .3s steps(4),transform .3s steps(4);pointer-events:none}
+#w:hover #week,#w.open #week{opacity:1;transform:none}
+#w:hover .txt,#w.open .txt{opacity:0}
+#wh{font-size:calc(var(--p)*3.4);opacity:.7;margin-bottom:calc(var(--p)*4);text-align:center;letter-spacing:calc(var(--p)*.3)}
+#wg{display:grid;grid-template-columns:repeat(7,1fr);gap:calc(var(--p)*1.5)}
+.d{text-align:center;padding:calc(var(--p)*2) 0;border-radius:calc(var(--p)*2)}
+.d.today{background:rgba(255,255,255,.09);box-shadow:inset 0 0 0 calc(var(--p)*.5) rgba(255,255,255,.25)}
+.dn{font-size:calc(var(--p)*3.4);opacity:.9}
+.d canvas{width:calc(var(--p)*13);height:calc(var(--p)*13);image-rendering:pixelated;margin:calc(var(--p)*2) auto;display:block;animation:bob 1.6s steps(2) infinite}
+.mx{font-size:calc(var(--p)*3.8)}
+.mn{font-size:calc(var(--p)*3.2);opacity:.55;margin-top:calc(var(--p)*1.5)}
+.pp{font-size:calc(var(--p)*2.9);color:#8fc4ff;margin-top:calc(var(--p)*2)}
+@keyframes bob{50%{transform:translateY(calc(var(--p)*-1))}}
+</style>
+</head>
+<body>
+<div id="w">
+  <canvas id="c"></canvas>
+  <div class="txt" id="tl"><div id="city">PARIS</div><div id="date"></div></div>
+  <div class="txt" id="tr"><div id="temp">--°</div><div id="cond"></div><div id="feels"></div></div>
+  <div class="txt" id="tick"></div>
+  <div id="week"><div id="wh"></div><div id="wg"></div></div>
+</div>
+<script>
+(() => {
+// ================= Réglages (via l'URL) =================
+const Q = new URLSearchParams(location.search);
+const LAT = +(Q.get('lat') || 48.8566), LON = +(Q.get('lon') || 2.3522);
+const CITY = (Q.get('city') || 'Paris').toUpperCase();
+const TZ = 'Europe/Paris';
+const DEMO = Q.get('demo');                 // clear | clouds | rain | storm | snow | fog | wind
+const FIX_T = Q.get('t');                   // ex. 18:30 pour figer l'heure
+const SPEED = +(Q.get('speed') || 0);       // ex. 600 = la journée défile 600x plus vite
+const SCENES = ['paris','ville','mer','montagnes','campagne','desert','foret'];
+
+let framed = true; try { framed = window.self !== window.top; } catch(e) {}
+if (Q.get('bg')) document.documentElement.style.background = '#'+Q.get('bg');
+else if (!framed) document.documentElement.style.background = '#191919';
+
+// ================= Utilitaires =================
+const hx = h => { h = h.replace('#',''); return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; };
+const mix = (a,b,t) => [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+const mul = (a,b) => [a[0]*b[0]/255, a[1]*b[1]/255, a[2]*b[2]/255];
+const scl = (a,k) => [a[0]*k, a[1]*k, a[2]*k];
+const css = (c,a=1) => `rgba(${c[0]|0},${c[1]|0},${c[2]|0},${a})`;
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const lum = c => c[0]*.3+c[1]*.59+c[2]*.11;
+function rng(s){ return () => { s|=0; s=s+0x6D2B79F5|0; let t=Math.imul(s^s>>>15,1|s); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function noise(seed){ const r=rng(seed), v=[]; for(let i=0;i<512;i++) v.push(r()); return x => { const i=Math.floor(x), f=x-i, u=f*f*(3-2*f); return v[i&511]*(1-u)+v[(i+1)&511]*u; }; }
+function ridge(seed, base, amp, freq, oct=3, sharp=false){
+  const n = noise(seed), h = [];
+  for (let x=0; x<VW; x++){
+    let a=0, s=1, f=freq, tot=0;
+    for (let o=0;o<oct;o++){ let v=n(x*f+o*37); if(sharp) v=1-Math.abs(2*v-1); a+=v*s; tot+=s; s*=.5; f*=2; }
+    a/=tot; if (sharp) a=Math.pow(a,1.7);
+    h.push(Math.round(base - amp*a));
+  }
+  return h;
+}
+const fmt = m => { m=((Math.round(m)%1440)+1440)%1440; return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0'); };
+const dur = m => { m=Math.round(m); const h=Math.floor(m/60); return h ? `${h}H${String(m%60).padStart(2,'0')}` : `${m} MIN`; };
+
+// ================= Canvas =================
+const VH = 90;
+let VW = 220, P = 2, HY = 58;
+const cv = document.getElementById('c'), cx = cv.getContext('2d');
+const off = document.createElement('canvas'), o = off.getContext('2d');
+const W = document.getElementById('w');
+let skyImg = null, skyAge = 99;
+
+// ================= Météo : libellés =================
+const LABEL = c => ({0:'CIEL CLAIR',1:'PLUTÔT CLAIR',2:'ÉCLAIRCIES',3:'COUVERT',45:'BROUILLARD',48:'BROUILLARD GIVRANT',
+  51:'BRUINE LÉGÈRE',53:'BRUINE',55:'BRUINE DENSE',56:'BRUINE VERGLAÇANTE',57:'BRUINE VERGLAÇANTE',
+  61:'PLUIE FAIBLE',63:'PLUIE',65:'FORTE PLUIE',66:'PLUIE VERGLAÇANTE',67:'PLUIE VERGLAÇANTE',
+  71:'NEIGE FAIBLE',73:'NEIGE',75:'FORTE NEIGE',77:'GRÉSIL',80:'AVERSES',81:'AVERSES',82:'FORTES AVERSES',
+  85:'AVERSES DE NEIGE',86:'AVERSES DE NEIGE',95:'ORAGE',96:'ORAGE + GRÊLE',99:'ORAGE + GRÊLE'})[c] || '—';
+const ICON = c => c<=1?'sun':c===2?'partly':c===3?'cloud':(c===45||c===48)?'fog':((c>=71&&c<=77)||c===85||c===86)?'snow':c>=95?'storm':'rain';
+const DAYS = ['DIM','LUN','MAR','MER','JEU','VEN','SAM'];
+const MONTHS = ['JANV','FÉVR','MARS','AVR','MAI','JUIN','JUIL','AOÛT','SEPT','OCT','NOV','DÉC'];
+const CARD = d => ['N','NE','E','SE','S','SO','O','NO'][Math.round(((d%360)+360)%360/45)%8];
+
+// ================= Données =================
+let DATA = null, OFFLINE = false;
+const toMin = s => +s.slice(11,13)*60 + +s.slice(14,16);
+
+function demoData(kind){
+  const codes = {clear:0, clouds:3, rain:63, storm:95, snow:73, fog:45, wind:2}, c = codes[kind] ?? 2;
+  const base = new Date();
+  const daily = [];
+  const wk = [c,61,2,3,0,71,80];
+  for (let i=0;i<7;i++){ const d=new Date(base); d.setDate(d.getDate()+i);
+    daily.push({date:d, code:i?wk[i]:c, max:[11,10,5,6,2,4,8][i], min:[4,1,-1,2,-2,0,3][i], sr:8*60+12+i, ss:17*60+2-i, pp:[20,80,30,40,5,60,70][i], uv:1}); }
+  const hourly = []; for (let h=0;h<36;h++) hourly.push({h, pp: (h>14&&h<18)?70:10, code:c});
+  return { cur:{temp:9, feels:6, hum:78, code:c, cloud:{clear:5,clouds:95,rain:100,storm:100,snow:100,fog:100,wind:40}[kind]??40,
+    wind: kind==='wind'?48:kind==='storm'?35:12, dir:250, gust: kind==='wind'?75:22, precip: (kind==='rain'||kind==='storm')?2:0}, daily, hourly };
+}
+
+async function load(){
+  if (DEMO){ DATA = demoData(DEMO); onData(); return; }
+  const url = `https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}`+
+    `&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m`+
+    `&hourly=precipitation_probability,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,uv_index_max`+
+    `&timezone=${encodeURIComponent(TZ)}&forecast_days=7`;
+  try {
+    const r = await fetch(url); if (!r.ok) throw 0; const j = await r.json();
+    const c = j.current, d = j.daily, h = j.hourly;
+    const curHour = c.time.slice(0,13);
+    const i0 = Math.max(0, h.time.findIndex(t => t.slice(0,13) === curHour));
+    DATA = {
+      cur:{temp:c.temperature_2m, feels:c.apparent_temperature, hum:c.relative_humidity_2m, code:c.weather_code, cloud:c.cloud_cover,
+           wind:c.wind_speed_10m, dir:c.wind_direction_10m, gust:c.wind_gusts_10m, precip:c.precipitation},
+      daily: d.time.map((t,i) => ({date:new Date(t+'T12:00'), code:d.weather_code[i], max:d.temperature_2m_max[i], min:d.temperature_2m_min[i],
+           sr:toMin(d.sunrise[i]), ss:toMin(d.sunset[i]), pp:d.precipitation_probability_max[i], uv:d.uv_index_max[i]})),
+      hourly: h.time.slice(i0, i0+36).map((t,k) => ({h:+t.slice(11,13), pp:h.precipitation_probability[i0+k], code:h.weather_code[i0+k]}))
+    };
+    OFFLINE = false;
+  } catch(e) {
+    if (!DATA){ DATA = demoData('clouds'); OFFLINE = true; }
+  }
+  onData();
+}
+
+// ================= État météo dérivé =================
+const WX = {cloud:.4, rain:0, snow:0, storm:0, fog:0, wind:10, dirE:1};
+function onData(){
+  const c = DATA.cur, k = c.code;
+  let rain = 0, snow = 0;
+  if (k>=51&&k<=57) rain = [.25,.35,.45,.35,.45][[51,53,55,56,57].indexOf(k)] || .3;
+  if (k>=61&&k<=67) rain = {61:.4,63:.65,65:.95,66:.5,67:.7}[k];
+  if (k>=80&&k<=82) rain = {80:.5,81:.7,82:1}[k];
+  if (k>=95) rain = .85;
+  if ((k>=71&&k<=77)) snow = {71:.35,73:.65,75:1,77:.4}[k];
+  if (k===85||k===86) snow = k===85?.5:.9;
+  if (!rain && !snow && c.precip>0.1) rain = .25;
+  WX.cloud = clamp(c.cloud/100, 0, 1);
+  if (k===3) WX.cloud = Math.max(WX.cloud,.9);
+  if (rain||snow) WX.cloud = Math.max(WX.cloud,.85);
+  WX.rain = rain; WX.snow = snow; WX.storm = k>=95 ? 1 : 0; WX.fog = (k===45||k===48) ? 1 : 0;
+  WX.wind = c.wind; WX.gust = c.gust;
+  WX.dirE = -Math.sin(c.dir*Math.PI/180) >= 0 ? 1 : -1;   // sens de déplacement est/ouest
+  buildWeek(); updateText(true);
+}
+
+// ================= Temps =================
+const T0 = performance.now();
+function parisClock(){
+  const p = new Intl.DateTimeFormat('fr-FR',{timeZone:TZ,hour:'numeric',minute:'numeric',second:'numeric',hourCycle:'h23'}).formatToParts(new Date());
+  const g = t => +p.find(x=>x.type===t).value; return g('hour')*60 + g('minute') + g('second')/60;
+}
+const START = FIX_T ? (+FIX_T.split(':')[0]*60 + +(FIX_T.split(':')[1]||0)) : parisClock();
+function nowMin(){
+  if (SPEED) return (START + (performance.now()-T0)/1000*SPEED/60) % 1440;
+  if (FIX_T) return START;
+  return parisClock();
+}
+
+// ================= Ciel : images clés =================
+const KF = {
+  NIGHT:  {top:'#0a0f26', bot:'#1c2448', amb:'#4c5688', light:.32},
+  BLUE:   {top:'#18234e', bot:'#46578c', amb:'#5d6c9e', light:.42},
+  DAWN:   {top:'#3c4a8c', bot:'#f2a08a', amb:'#c99aa2', light:.62},
+  MORNING:{top:'#5a8fd8', bot:'#c4e2f2', amb:'#eaf0f6', light:.92},
+  DAY:    {top:'#3d7ed8', bot:'#a6d2f0', amb:'#ffffff', light:1},
+  AFTER:  {top:'#477dce', bot:'#e6d6aa', amb:'#fff1da', light:.95},
+  GOLDEN: {top:'#566cb8', bot:'#ffad6c', amb:'#ffc68c', light:.85},
+  DUSK:   {top:'#2c2d6a', bot:'#ff7868', amb:'#d08890', light:.6},
+  BLUEH:  {top:'#161e4a', bot:'#484e8c', amb:'#6a70a8', light:.42}
+};
+for (const k in KF) ['top','bot','amb'].forEach(p => KF[k][p] = hx(KF[k][p]));
+function keyframes(sr, ss){
+  const noon = (sr+ss)/2;
+  return [[sr-80,'NIGHT'],[sr-35,'BLUE'],[sr+5,'DAWN'],[sr+55,'MORNING'],[noon,'DAY'],[ss-80,'AFTER'],[ss-25,'GOLDEN'],[ss+8,'DUSK'],[ss+38,'BLUEH'],[ss+85,'NIGHT']];
+}
+function skyAt(m, sr, ss){
+  const k = keyframes(sr, ss);
+  if (m <= k[0][0] || m >= k[k.length-1][0]) return {...KF.NIGHT};
+  let i = 0; while (m >= k[i+1][0]) i++;
+  const a = KF[k[i][1]], b = KF[k[i+1][1]], t = (m-k[i][0])/(k[i+1][0]-k[i][0]);
+  return {top:mix(a.top,b.top,t), bot:mix(a.bot,b.bot,t), amb:mix(a.amb,b.amb,t), light:a.light+(b.light-a.light)*t};
+}
+
+// ================= Environnement courant =================
+const E = {};
+function computeEnv(){
+  const day = DATA.daily[0], m = nowMin();
+  const s = skyAt(m, day.sr, day.ss);
+  E.m = m; E.sr = day.sr; E.ss = day.ss;
+  E.night = 1 - clamp((s.light-.36)/.4, 0, 1);
+  const grey = c => { const l = lum(c); return [l*.95, l*.97, l*1.04]; };
+  const ov = WX.cloud*.7 + WX.rain*.2 + WX.snow*.1 + WX.fog*.3;
+  let top = mix(s.top, grey(s.top), clamp(ov,0,.9)), bot = mix(s.bot, grey(s.bot), clamp(ov*.9,0,.9));
+  const dark = 1 - WX.rain*.25 - WX.storm*.25;
+  top = scl(top, dark); bot = scl(bot, dark);
+  if (WX.snow) bot = mix(bot, scl([235,238,245], s.light), .25);
+  E.top = top; E.bot = bot;
+  E.amb = mix(s.amb, grey(s.amb), clamp(ov*.6,0,.8));
+  E.light = s.light * (1 - WX.cloud*.18 - WX.rain*.12);
+  E.haze = mix(bot, top, .15);
+  // soleil
+  const f = (m - day.sr)/(day.ss - day.sr);
+  E.sun = (f > -.08 && f < 1.08) ? {x: 10 + f*(VW-20), y: HY + 4 - Math.sin(Math.PI*clamp(f,0,1))*(HY-14) + (f<0? -f*60 : f>1 ? (f-1)*60 : 0), low: 1-Math.sin(Math.PI*clamp(f,0,1))} : null;
+  // lune
+  const nightLen = day.sr + 1440 - day.ss, g = (((m - day.ss) % 1440) + 1440) % 1440 / nightLen;
+  E.moon = (g > -.05 && g < 1.05 && E.night > .05) ? {x: 10 + g*(VW-20), y: HY + 2 - Math.sin(Math.PI*clamp(g,0,1))*(HY-18)} : null;
+}
+function shade(base, depth){
+  let c = mul(base, E.amb);
+  c = scl(c, .28 + .72*E.light);
+  return css(mix(c, E.haze, clamp(depth*.72 + WX.fog*depth*.25, 0, .92)));
+}
+function lineFill(h, base, depth){ o.fillStyle = shade(base, depth); for (let x=0;x<VW;x++) o.fillRect(x, h[x], 1, VH-h[x]); }
+function snowCap(h, depth, every=1){ if (WX.snow < .3) return; o.fillStyle = shade([240,244,252], depth*.6); for (let x=0;x<VW;x+=every) o.fillRect(x, h[x], 1, 1 + (x%3===0?1:0)); }
+function circle(x0,y0,r){ for (let y=-r;y<=r;y++){ const w = Math.floor(Math.sqrt(r*r - y*y + r*.6)); o.fillRect(Math.round(x0-w), Math.round(y0+y), w*2+1, 1); } }
+
+// ================= Fumées partagées =================
+let smoke = [];
+function emitSmoke(list, dt){
+  for (const e of list){ e.t = (e.t||Math.random()) - dt; if (e.t <= 0){ e.t = .35 + Math.random()*.3; smoke.push({x:e.x+.5, y:e.y, life:1}); } }
+}
+function drawSmoke(dt){
+  const vx = WX.dirE * (1 + WX.wind*.16);
+  o.fillStyle = shade([200,204,214], .2);
+  for (let i=smoke.length-1;i>=0;i--){ const s = smoke[i];
+    s.x += vx*dt*(1.2-s.life); s.y -= (3.2 - WX.wind*.03)*dt; s.life -= dt*.32;
+    if (s.life <= 0){ smoke.splice(i,1); continue; }
+    o.globalAlpha = s.life*.45; const sz = s.life < .55 ? 2 : 1;
+    o.fillRect(Math.round(s.x), Math.round(s.y), sz, sz); }
+  o.globalAlpha = 1;
+}
+function windSway(t, x, k=1){ return Math.round(Math.sin(t*(1.2+WX.wind*.03) + x*.35) * clamp(WX.wind/22,.15,2.2) * k); }
+function lit(seed, t){ return seed < .38 && (Math.sin(t*.07 + seed*800) > -.85); }
+
+// ================= Paysages =================
+const S = {};
+const SC = {
+  // ---------- PARIS : toits en zinc + tour Eiffel ----------
+  paris: {
+    gen(){
+      const r = rng(11);
+      S.far = ridge(3, HY+4, 4, .03, 2);
+      S.tx = Math.round(VW*.68); S.tb = HY+7; S.th = 40;
+      S.mid = []; S.win = []; let x = -2;
+      while (x < VW){ const w = 5+Math.floor(r()*9), top = HY+3+Math.floor(r()*9); S.mid.push([x,w,top]);
+        for (let wy=top+2; wy<VH-14; wy+=3) for (let wx=x+1; wx<x+w-1; wx+=2) S.win.push([wx,wy,r()]); x += w; }
+      S.near = []; S.chim = []; S.nwin = []; x = -3;
+      while (x < VW){ const w = 11+Math.floor(r()*13), top = VH-21+Math.floor(r()*6); S.near.push([x,w,top]);
+        if (r() < .75){ const c = x+3+Math.floor(r()*(w-6)); S.chim.push({x:c, y:top-4}); }
+        for (let wx=x+3; wx<x+w-3; wx+=4) S.nwin.push([wx, top+6, r()]), S.nwin.push([wx, top+11, r()]);
+        x += w; }
+    },
+    draw(t, dt){
+      lineFill(S.far, [110,124,150], .82);
+      // Tour Eiffel
+      const night = E.night, gold = [236,168,72];
+      const tc = mix(hx('#4a4f63'), gold, night*.9);
+      o.fillStyle = night > .3 ? css(mix(scl(tc,1), gold, .2)) : shade(hx('#5a5f73'), .55);
+      const {tx, tb, th} = S;
+      for (let y=0; y<th; y++){ const f = y/th, hw = .5 + Math.pow(f,2.3)*9.5, yy = tb-th+y;
+        const x0 = Math.round(tx-hw), x1 = Math.round(tx+hw);
+        if (f > .8){ const g = Math.round((f-.8)/.2*hw*.72); o.fillRect(x0,yy,Math.max(1,tx-g-x0),1); o.fillRect(tx+g+1,yy,Math.max(1,x1-tx-g),1); }
+        else o.fillRect(x0, yy, x1-x0+1, 1);
+        if (Math.abs(f-.42)<.013 || Math.abs(f-.67)<.013) o.fillRect(x0-1, yy, x1-x0+3, 1);
+      }
+      o.fillRect(tx, tb-th-3, 1, 3);
+      if (night > .5){
+        // phare tournant
+        const a = t*1.1, L = 46*Math.abs(Math.cos(a)), sg = Math.cos(a) > 0 ? 1 : -1;
+        for (let i=2;i<L;i++){ o.fillStyle = `rgba(255,236,180,${(1-i/L)*.32*night})`; o.fillRect(tx+sg*i, tb-th-1 + Math.floor(i*.04), 1, 1); }
+        // scintillement : 5 premières minutes de chaque heure, comme la vraie
+        const mm = Math.floor(E.m) % 60, hh = Math.floor(E.m/60);
+        if (mm < 5 && (hh >= 17 || hh < 1)){
+          o.fillStyle = '#fffdf0';
+          for (let k=0;k<22;k++){ const y = Math.random()*th, f=y/th, hw=.5+Math.pow(f,2.3)*9.5; o.fillRect(Math.round(tx+(Math.random()*2-1)*hw), Math.round(tb-th+y), 1, 1); }
+        }
+      }
+      // immeubles du milieu
+      for (const [x,w,top] of S.mid){ o.fillStyle = shade([150,140,130], .45); o.fillRect(x, top, w, VH-top);
+        o.fillStyle = shade([95,104,122], .45); o.fillRect(x, top, w, 1); }
+      for (const [x,y,s] of S.win){
+        if (night > .15 && lit(s, t+x)) { o.fillStyle = `rgba(255,200,110,${night*.85})`; o.fillRect(x,y,1,1); }
+        else if (s < .5){ o.fillStyle = shade([90,92,104], .45); o.fillRect(x,y,1,1); } }
+      // toits haussmanniens au premier plan
+      for (const [x,w,top] of S.near){
+        o.fillStyle = shade([108,122,142], .05);
+        for (let k=0;k<4;k++) o.fillRect(x+3-k, top+k, w-2*(3-k), 1);
+        o.fillStyle = shade([150,164,182], .05); o.fillRect(x+3, top, w-6, 1);
+        o.fillStyle = shade([222,206,176], .02); o.fillRect(x, top+4, w, VH-top-4);
+        o.fillStyle = shade([180,160,130], .02); o.fillRect(x, top+4, 1, VH-top-4);
+        o.fillStyle = shade([70,74,86], .02); o.fillRect(x, top+8, w, 1);
+      }
+      for (const [x,y,s] of S.nwin){
+        if (night > .15 && lit(s*1.2, t+x)){ o.fillStyle = `rgba(255,196,104,${.4+night*.6})`; o.fillRect(x,y,2,3);
+          o.fillStyle = `rgba(255,196,104,${night*.12})`; o.fillRect(x-1,y-1,4,5); }
+        else { o.fillStyle = shade([70,80,100], .02); o.fillRect(x,y,2,3); } }
+      for (const c of S.chim){ o.fillStyle = shade([176,98,72], .05); o.fillRect(c.x, c.y, 3, 4);
+        o.fillStyle = shade([130,70,55], .05); o.fillRect(c.x, c.y, 3, 1); }
+      if (WX.snow > .3){ o.fillStyle = shade([240,244,252], 0); for (const [x,w,top] of S.near) for (let k=0;k<4;k++) o.fillRect(x+3-k, top+k-1, 1, 1), o.fillRect(x+3, top-1, w-6, 1); }
+      emitSmoke(S.chim, dt); drawSmoke(dt);
+    }
+  },
+
+  // ---------- MER : falaise, phare, voilier ----------
+  mer: {
+    gen(){
+      const r = rng(5), edge = Math.round(VW*.28), raw = ridge(7, HY-8, 7, .05, 3);
+      S.cliff = raw.map((y,x) => x < edge ? y : x < edge+5 ? Math.round(y + (x-edge)*(HY+2-y)/5) : VH+5);
+      S.isl = []; const a = Math.round(VW*.7), b = Math.round(VW*.9);
+      for (let x=0;x<VW;x++) S.isl.push(x>a&&x<b ? Math.round(HY - 4*Math.sin(Math.PI*(x-a)/(b-a)) - (x%5===0?1:0)) : VH+5);
+      S.lx = Math.round(VW*.13);
+      S.gl = []; for (let i=0;i<70;i++) S.gl.push([r()*VW, HY+2+Math.pow(r(),1.4)*(VH-HY-4), 1+Math.floor(r()*4), r()*6.28]);
+      S.boat = r()*VW;
+    },
+    draw(t, dt){
+      lineFill(S.isl, [100,118,128], .8);
+      // mer
+      for (let y=HY; y<VH; y++){ const f = (y-HY)/(VH-HY);
+        const c = mix(mix(E.bot, E.top, .25), mul([30,70,100], E.amb), .35 + f*.45);
+        o.fillStyle = css(scl(c, .7 + .3*E.light)); o.fillRect(0, y, VW, 1); }
+      o.fillStyle = css(mix(E.bot,[255,255,255],.25), .6); o.fillRect(0, HY, VW, 1);
+      // reflets du soleil / de la lune
+      const src = E.sun && E.sun.y < HY+2 ? {x:E.sun.x, c:mix([255,240,200],[255,150,80],E.sun.low), a:.65*(1-WX.cloud*.7)} :
+                  E.moon ? {x:E.moon.x, c:[220,228,255], a:.45*(1-WX.cloud*.8)} : null;
+      if (src && src.a > .05) for (let y=HY+1; y<VH; y+=2){ const f=(y-HY)/(VH-HY), w = 2 + f*8 + Math.sin(t*3+y)*1.5;
+        o.fillStyle = css(src.c, src.a*(1-f*.6)*(.6+.4*Math.sin(t*4+y*1.7))); o.fillRect(Math.round(src.x - w/2 + Math.sin(t*2+y)*1.2), y, Math.round(w), 1); }
+      // scintillements
+      for (const g of S.gl){ const a = Math.max(0, Math.sin(t*1.4 + g[3]))*(.25+.45*E.light);
+        g[0] += (WX.dirE*(.4+WX.wind*.03))*dt; if (g[0] > VW) g[0] -= VW; if (g[0] < 0) g[0] += VW;
+        o.fillStyle = css(mix(E.bot,[255,255,255],.6), a); o.fillRect(Math.round(g[0]), Math.round(g[1]), g[2] + Math.round(WX.wind/25), 1); }
+      // voilier
+      S.boat += (1.2 + WX.wind*.06)*dt*WX.dirE; if (S.boat > VW+10) S.boat = -10; if (S.boat < -10) S.boat = VW+10;
+      const bx = Math.round(S.boat), by = HY+9 + Math.round(Math.sin(t*1.3)*(.6 + WX.wind/40));
+      o.fillStyle = shade([90,60,45], .15); o.fillRect(bx-3, by, 8, 1); o.fillRect(bx-2, by+1, 6, 1);
+      o.fillStyle = shade([60,50,45], .15); o.fillRect(bx, by-8, 1, 8);
+      o.fillStyle = shade([245,240,228], .15); for (let k=0;k<7;k++) o.fillRect(bx+1, by-8+k, Math.floor(k*.6)+1, 1);
+      if (E.night > .4){ o.fillStyle = 'rgba(255,210,120,.9)'; o.fillRect(bx, by-9, 1, 1); }
+      // falaise
+      lineFill(S.cliff, [112,98,82], .04);
+      o.fillStyle = shade([96,128,70], .04); for (let x=0;x<VW;x++) if (S.cliff[x] < VH) o.fillRect(x, S.cliff[x], 1, 2);
+      o.fillStyle = shade([126,156,90], .04); for (let x=0;x<VW;x+=2) if (S.cliff[x] < VH) o.fillRect(x + windSway(t,x,.5), S.cliff[x]-1, 1, 1);
+      snowCap(S.cliff, 0);
+      // phare
+      const lx = S.lx, ly = S.cliff[lx];
+      for (let k=0;k<12;k++){ o.fillStyle = shade(k%4<2 ? [240,236,228] : [190,60,55], .03); o.fillRect(lx-1 - (k>8?1:0), ly-12+k, 3 + (k>8?2:0), 1); }
+      o.fillStyle = shade([60,60,70], .03); o.fillRect(lx-2, ly-15, 5, 1); o.fillRect(lx-1, ly-16, 3, 1);
+      const on = E.night > .3;
+      o.fillStyle = on ? '#ffe9a0' : shade([200,210,220], .03); o.fillRect(lx-1, ly-14, 3, 2);
+      if (on){ const a = t*1.5, L = 70*Math.abs(Math.cos(a)), sg = Math.cos(a) > 0 ? 1 : -1;
+        for (let i=2;i<L;i++){ const th = 1 + Math.floor(i*.07); o.fillStyle = `rgba(255,240,190,${(1-i/L)*.28*E.night})`; o.fillRect(lx+sg*i, ly-13-Math.floor(th/2), 1, th); } }
+      // écume
+      o.fillStyle = css([255,255,255], .35 + .25*E.light);
+      for (let x=0;x<VW;x+=3){ const y = VH-2 - Math.round((1+Math.sin(t*1.8 + x*.25))*(.5 + WX.wind/40)); o.fillRect(x, y, 2, 1); }
+    }
+  },
+
+  // ---------- MONTAGNES : sommets enneigés, lac, sapins ----------
+  montagnes: {
+    gen(){
+      const r = rng(9);
+      S.far = ridge(31, HY-2, 34, .022, 3, true);
+      S.mid = ridge(32, HY+6, 16, .035, 3, true);
+      S.lake = HY+10;
+      S.trees = []; for (let x=-2; x<VW+2; x += 2+Math.floor(r()*3)) S.trees.push([x, 7+Math.floor(r()*8), r()]);
+      S.gl = []; for (let i=0;i<30;i++) S.gl.push([r()*VW, S.lake+2+r()*(VH-S.lake-12), r()*6.28]);
+    },
+    draw(t, dt){
+      lineFill(S.far, [118,130,160], .72);
+      o.fillStyle = shade([236,240,252], .55);
+      for (let x=0;x<VW;x++){ const lim = HY-14; if (S.far[x] < lim) o.fillRect(x, S.far[x], 1, Math.min(lim-S.far[x], 3 + ((x*7)%5))); }
+      lineFill(S.mid, [64,78,104], .42);
+      o.fillStyle = shade([226,232,246], .4);
+      for (let x=0;x<VW;x++){ if (S.mid[x] < HY-2 || WX.snow > .3) o.fillRect(x, S.mid[x], 1, 1 + (x%4===0?1:0)); }
+      // lac
+      for (let y=S.lake; y<VH-6; y++){ const f = (y-S.lake)/(VH-6-S.lake);
+        o.fillStyle = css(scl(mix(mix(E.bot,E.top,.4 + f*.3), [40,60,80], .3), .75 + .25*E.light)); o.fillRect(0,y,VW,1); }
+      // reflet des montagnes
+      o.fillStyle = shade([70,84,110], .5); o.globalAlpha = .45;
+      for (let x=0;x<VW;x++){ const d = HY+6 - S.mid[x]; if (d > 0){ o.fillRect(x + (Math.round(Math.sin(t*2+x)*.6)), S.lake, 1, Math.min(Math.round(d*.35), VH-6-S.lake)); } }
+      o.globalAlpha = 1;
+      const src = E.sun ? {x:E.sun.x, c:[255,230,190], a:.5*(1-WX.cloud*.7)} : E.moon ? {x:E.moon.x, c:[220,228,255], a:.4*(1-WX.cloud*.8)} : null;
+      if (src) for (let y=S.lake+1; y<VH-6; y+=2){ o.fillStyle = css(src.c, src.a*(.5+.5*Math.sin(t*4+y))); o.fillRect(Math.round(src.x-2+Math.sin(t*2+y)), y, 4, 1); }
+      for (const g of S.gl){ o.fillStyle = css([255,255,255], Math.max(0,Math.sin(t*1.2+g[2]))*.35); o.fillRect(Math.round(g[0]), Math.round(g[1]), 2+Math.round(WX.wind/20), 1); }
+      // sapins
+      o.fillStyle = shade([30,48,38], .04); o.fillRect(0, VH-6, VW, 6);
+      for (const [x, h, s] of S.trees){
+        const base = VH-5, c = s < .5 ? [30,58,42] : [38,68,48];
+        o.fillStyle = shade(c, .03);
+        for (let k=0;k<h;k++){ const f = k/h, w = Math.floor(k/2.2)+1, sw = Math.round(Math.sin(t*(1.1+WX.wind*.03)+x*.4)*clamp(WX.wind/25,.1,2)*(1-f));
+          o.fillRect(x - Math.floor(w/2) + sw, base-h+k, w, 1); }
+        if (WX.snow > .3){ o.fillStyle = shade([240,244,252], .03); o.fillRect(x, base-h, 1, 1); o.fillRect(x-1, base-h+3, 1, 1); o.fillRect(x+1, base-h+5, 1, 1); }
+      }
+      if (WX.snow > .3){ o.fillStyle = shade([236,240,250], 0); o.fillRect(0, VH-6, VW, 2); }
+    }
+  },
+
+  // ---------- CAMPAGNE : collines, champs, éolienne, maison ----------
+  campagne: {
+    gen(){
+      S.far = ridge(21, HY+1, 9, .025, 2);
+      S.mid = ridge(22, HY+12, 8, .03, 2);
+      S.near = ridge(23, VH-11, 4, .04, 2);
+      S.wt = Math.round(VW*.8); S.wa = 0;
+      S.tr = Math.round(VW*.22); S.hs = Math.round(VW*.56);
+      S.chim = [{x:S.hs+5, y:S.near[S.hs]-12}];
+    },
+    draw(t, dt){
+      lineFill(S.far, [96,128,104], .75);
+      // champs rayés
+      const fA = shade([132,168,82], .35), fB = shade([176,180,92], .35);
+      for (let x=0;x<VW;x++){ const h = S.mid[x];
+        for (let y=h; y<VH; y++){ o.fillStyle = (Math.floor((x*.6 + y*2.2)/6) % 2) ? fA : fB; o.fillRect(x,y,1,1); } }
+      snowCap(S.mid, .35);
+      // éolienne (tourne selon le vrai vent)
+      const wx = S.wt, wy = S.mid[wx] - 20;
+      o.fillStyle = shade([236,238,242], .3); o.fillRect(wx, wy, 1, S.mid[wx]-wy);
+      S.wa += dt*(.4 + WX.wind*.09);
+      for (let b=0;b<3;b++){ const a = S.wa + b*2.094; for (let i=1;i<9;i++) o.fillRect(Math.round(wx + Math.cos(a)*i), Math.round(wy + Math.sin(a)*i), 1, 1); }
+      o.fillStyle = shade([200,204,212], .3); o.fillRect(wx-1, wy-1, 2, 2);
+      if (E.night > .4 && Math.sin(t*3) > 0){ o.fillStyle = '#ff4a3a'; o.fillRect(wx, wy-2, 1, 1); }
+      // colline proche + herbe
+      lineFill(S.near, [74,116,58], .02);
+      o.fillStyle = shade([104,150,74], .02);
+      for (let x=0;x<VW;x+=2){ const sw = windSway(t, x); o.fillRect(x+sw, S.near[x]-1, 1, 1); if (x%6===0) o.fillRect(x+sw*2, S.near[x]-2, 1, 1); }
+      snowCap(S.near, 0);
+      // arbre
+      const tx = S.tr, ty = S.near[tx], sw = windSway(t*.8, 0, 1.4);
+      o.fillStyle = shade([92,64,44], .02); o.fillRect(tx, ty-7, 2, 7);
+      o.fillStyle = shade([52,94,50], .02); circle(tx+1+sw, ty-12, 6);
+      o.fillStyle = shade([80,128,66], .02); circle(tx-1+sw, ty-14, 3);
+      if (WX.snow > .3){ o.fillStyle = shade([240,244,252], 0); o.fillRect(tx-3+sw, ty-18, 8, 1); }
+      // maison
+      const hx0 = S.hs, hy = S.near[hx0];
+      o.fillStyle = shade([232,220,194], .02); o.fillRect(hx0-4, hy-7, 11, 7);
+      o.fillStyle = shade([166,74,58], .02); for (let k=0;k<5;k++) o.fillRect(hx0-5+k, hy-8-k, 13-2*k, 1);
+      o.fillStyle = shade([120,60,48], .02); o.fillRect(hx0+5, hy-13, 2, 4);
+      o.fillStyle = shade([90,70,60], .02); o.fillRect(hx0+3, hy-4, 2, 4);
+      const on = E.night > .2;
+      o.fillStyle = on ? `rgba(255,200,110,${.5+E.night*.5})` : shade([90,110,130], .02); o.fillRect(hx0-2, hy-5, 3, 2);
+      if (on){ o.fillStyle = `rgba(255,200,110,${E.night*.12})`; o.fillRect(hx0-4, hy-7, 7, 6); }
+      if (WX.snow > .3){ o.fillStyle = shade([240,244,252], 0); for (let k=0;k<5;k++) o.fillRect(hx0-5+k, hy-9-k, 2, 1), o.fillRect(hx0+6-k, hy-9-k, 2, 1); }
+      S.chim[0].y = hy-14; emitSmoke(S.chim, dt); drawSmoke(dt);
+    }
+  },
+
+  // ---------- VILLE : mégalopole, gratte-ciel, néons, métro aérien ----------
+  ville: {
+    gen(){
+      const r = rng(41);
+      S.far = []; let x = -3;
+      while (x < VW){ const w = 4+Math.floor(r()*7), h = 14+Math.floor(r()*34); S.far.push([x, w, HY+8-h, r() < .25]); x += w + (r()<.3?1:0); }
+      S.fwin = []; for (const [fx,w,top] of S.far) for (let y=top+2; y<HY+6; y+=2) for (let xx=fx+1; xx<fx+w-1; xx+=2) if (r() < .35) S.fwin.push([xx,y,r()]);
+      S.mid = []; S.win = []; S.neon = []; S.bill = []; x = -4;
+      const NEON = ['#ff3d8b','#3de8ff','#ffb13d','#9d5bff','#5bff9d'];
+      while (x < VW){ const w = 8+Math.floor(r()*10), top = HY-26+Math.floor(r()*30), glass = r() < .45;
+        S.mid.push({x, w, top, glass, tone:r()});
+        for (let y=top+3; y<VH-14; y+=3) for (let xx=x+1; xx<x+w-1; xx+=2) S.win.push([xx, y, r(), glass]);
+        if (r() < .4) S.neon.push({x: r()<.5 ? x : x+w-2, y: top+4+Math.floor(r()*10), h: 8+Math.floor(r()*10), c: hx(NEON[Math.floor(r()*NEON.length)]), seg: Math.floor(r()*1000), fl: r()});
+        if (r() < .2 && w > 9) S.bill.push({x:x+1, y:top-6, w:w-2, h:5, p:r()*6});
+        x += w + 1; }
+      S.ant = S.mid.filter(b => b.top < HY-14).map(b => ({x:b.x+Math.floor(b.w/2), y:b.top-5, p:r()*6}));
+      S.rail = VH-16; S.train = {x:-40, wait:2};
+      S.roofs = []; S.nh = new Array(VW).fill(VH); S.tanks = []; S.ac = []; x = -2;
+      while (x < VW){ const w = 12+Math.floor(r()*16), top = VH-9+Math.floor(r()*4); S.roofs.push([x,w,top]);
+        for (let k=0;k<w;k++) if (x+k>=0 && x+k<VW) S.nh[x+k] = top;
+        if (r() < .55) S.tanks.push([x+2+Math.floor(r()*(w-8)), top]); if (r() < .7) S.ac.push([x+Math.floor(r()*(w-4)), top]);
+        x += w; }
+      S.plane = null;
+    },
+    draw(t, dt){
+      const night = E.night;
+      // silhouettes lointaines
+      o.fillStyle = shade([96,108,138], .72);
+      for (const [x,w,top,sp] of S.far){ o.fillRect(x, top, w, VH-top); if (sp) o.fillRect(x+Math.floor(w/2), top-5, 1, 5); }
+      if (night > .1) for (const [x,y,s] of S.fwin) if (s < .6){ o.fillStyle = `rgba(255,220,160,${night*.35})`; o.fillRect(x,y,1,1); }
+      // tours principales
+      for (const b of S.mid){
+        const base = b.glass ? [74,96,128] : (b.tone < .5 ? [118,116,124] : [96,92,104]);
+        o.fillStyle = shade(base, .32); o.fillRect(b.x, b.top, b.w, VH-b.top);
+        o.fillStyle = shade(mix(base,[255,255,255],.2), .32); o.fillRect(b.x, b.top, b.w, 1);
+        if (b.glass){ // reflet du ciel sur le verre
+          o.fillStyle = css(mix(E.bot, E.top, .5), .22*(1-night*.7)); for (let k=1;k<b.w;k+=3) o.fillRect(b.x+k, b.top+1, 1, VH-b.top);
+        }
+      }
+      for (const [x,y,s,g] of S.win){
+        if (night > .12 && s < .58 && Math.sin(t*.05 + s*900) > -.9){ o.fillStyle = s < .2 ? `rgba(200,225,255,${.25+night*.6})` : `rgba(255,214,150,${.2+night*.7})`; o.fillRect(x,y,1,1); }
+        else if (!g){ o.fillStyle = shade([60,64,80], .32); o.fillRect(x,y,1,1); } }
+      // néons verticaux (signes abstraits) + panneaux
+      for (const n of S.neon){
+        const off = n.fl < .25 && Math.sin(t*7 + n.fl*50) > .8;
+        const a = off ? .15 : (.35 + .65*night) * (.85 + .15*Math.sin(t*3 + n.fl*9));
+        o.fillStyle = css(n.c, a*.18); o.fillRect(n.x-2, n.y-2, 6, n.h+4);
+        o.fillStyle = css(n.c, a);
+        for (let k=0;k<n.h;k++){ if (((n.seg >> (k%10)) & 1) || k%4===0) o.fillRect(n.x, n.y+k, 2, 1); }
+      }
+      for (const b of S.bill){
+        const c = mix(hx('#ff3d8b'), hx('#3de8ff'), .5+.5*Math.sin(t*.6+b.p)), a = .4 + .6*night;
+        o.fillStyle = shade([40,40,50], .3); o.fillRect(b.x+1, b.y+b.h, 1, 2); o.fillRect(b.x+b.w-2, b.y+b.h, 1, 2);
+        o.fillStyle = css(c, a); o.fillRect(b.x, b.y, b.w, b.h);
+        o.fillStyle = css([255,255,255], a*.7); o.fillRect(b.x+1 + Math.floor((t*3+b.p*5) % (b.w-3)), b.y+2, 2, 1);
+        if (night > .3){ o.fillStyle = css(c, .12*night); o.fillRect(b.x-2, b.y-2, b.w+4, b.h+4); }
+      }
+      for (const a of S.ant){ o.fillStyle = shade([60,60,70], .3); o.fillRect(a.x, a.y, 1, 5);
+        if (Math.sin(t*2.5 + a.p) > .3){ o.fillStyle = `rgba(255,60,50,${.5+night*.5})`; o.fillRect(a.x, a.y-1, 1, 1); } }
+      // métro aérien
+      const ry = S.rail;
+      o.fillStyle = shade([52,54,64], .1); o.fillRect(0, ry, VW, 2);
+      for (let x=4; x<VW; x+=14) o.fillRect(x, ry+2, 2, VH-ry);
+      const tr = S.train;
+      if (tr.wait > 0){ tr.wait -= dt; if (tr.wait <= 0) tr.x = -36; }
+      else { tr.x += 26*dt; if (tr.x > VW+4){ tr.wait = 6 + Math.random()*10; }
+        const x0 = Math.round(tr.x);
+        o.fillStyle = shade([210,214,222], .1); o.fillRect(x0, ry-5, 34, 5);
+        o.fillStyle = shade([60,140,110], .1); o.fillRect(x0, ry-2, 34, 1);
+        o.fillStyle = night > .2 ? `rgba(255,236,190,${.5+night*.5})` : shade([80,100,130], .1);
+        for (let k=2;k<32;k+=4) o.fillRect(x0+k, ry-4, 2, 1);
+        if (night > .2){ o.fillStyle = 'rgba(255,250,220,.9)'; o.fillRect(x0+34, ry-3, 1, 1); } }
+      // toits du premier plan : réservoirs d'eau, clims
+      o.fillStyle = shade([58,60,70], .03); for (const [x,w,top] of S.roofs) o.fillRect(x, top, w, VH-top);
+      o.fillStyle = shade([84,86,98], .03); for (const [x,w,top] of S.roofs) o.fillRect(x, top, w, 1);
+      for (const [x,top] of S.tanks){ o.fillStyle = shade([60,50,44], .03); o.fillRect(x, top-3, 1, 3); o.fillRect(x+4, top-3, 1, 3);
+        o.fillStyle = shade([128,92,64], .03); o.fillRect(x, top-8, 5, 5); o.fillStyle = shade([98,70,50], .03); o.fillRect(x+1, top-10, 3, 2); o.fillRect(x+2, top-11, 1, 1); }
+      for (const [x,top] of S.ac){ o.fillStyle = shade([150,152,160], .03); o.fillRect(x, top-2, 4, 2); }
+      snowCap(S.nh, 0);
+      // avion de nuit
+      if (night > .5 && !S.plane && Math.random() < dt*.05) S.plane = {x:-4, y:6+Math.random()*14};
+      if (S.plane){ const p = S.plane; p.x += 6*dt; p.y -= .3*dt; if (p.x > VW+4) S.plane = null;
+        else { o.fillStyle = 'rgba(255,255,255,.8)'; o.fillRect(Math.round(p.x), Math.round(p.y), 1, 1);
+          if (Math.sin(t*6) > .6){ o.fillStyle = '#ff4a3a'; o.fillRect(Math.round(p.x)-1, Math.round(p.y), 1, 1); } } }
+    }
+  },
+
+  // ---------- DÉSERT : mesas, dunes, cactus, mirage ----------
+  desert: {
+    gen(){
+      const r = rng(51);
+      S.mesa = new Array(VW).fill(HY+4);
+      const n = noise(55);
+      for (let m=0;m<3;m++){ const c = Math.floor(VW*(.15 + m*.33 + r()*.1)), w = 14+Math.floor(r()*22), ht = 10+Math.floor(r()*14);
+        for (let x=c-w-ht; x<c+w+ht; x++){ if (x<0||x>=VW) continue; const d = Math.abs(x-c);
+          const y = d < w ? HY+4-ht + Math.round(n(x*.3)*1.5) : HY+4-ht + Math.round((d-w)*1.3); S.mesa[x] = Math.min(S.mesa[x], Math.min(HY+4, y)); } }
+      S.d1 = ridge(53, HY+14, 13, .03, 1, true);
+      S.d2 = ridge(54, VH-8, 12, .022, 1, true);
+      S.cac = [[Math.round(VW*.18), 13, 1], [Math.round(VW*.74), 10, 0], [Math.round(VW*.46), 6, 1]];
+      S.tw = null;
+    },
+    draw(t, dt){
+      // mesas en strates
+      for (let x=0;x<VW;x++){ const h = S.mesa[x];
+        for (let y=h; y<HY+6; y++){ o.fillStyle = shade((y-h)%5 < 2 ? [190,104,72] : [166,88,64], .58); o.fillRect(x,y,1,1); } }
+      // dunes
+      for (const [h, base, dep] of [[S.d1,[218,160,104],.32],[S.d2,[236,186,122],.02]]){
+        const lt = shade(mix(base,[255,240,210],.15), dep), md = shade(base, dep), dk = shade(scl(base,.76), dep);
+        for (let x=0;x<VW;x++){ const sl = h[Math.min(VW-1,x+4)] - h[Math.max(0,x-4)];
+          o.fillStyle = sl > 0 ? dk : md; o.fillRect(x, h[x], 1, VH-h[x]);
+          if (sl <= 0){ o.fillStyle = lt; o.fillRect(x, h[x], 1, 2); } }
+        snowCap(h, dep);
+      }
+      // rides du sable
+      o.fillStyle = shade([200,150,96], .02);
+      for (let y=0; y<VH; y+=3) for (let x=(y*5)%9; x<VW; x+=9){ const yy = y + Math.round(Math.sin(x*.15+y)*1); if (yy > S.d2[x]+2) o.fillRect(x, yy, 4, 1); }
+      // cactus
+      for (const [x, h, arms] of S.cac){ const g = x < VW*.5 ? S.d2[x] : S.d2[x]; const base = (h < 8 ? S.d1[x] : g);
+        o.fillStyle = shade([64,108,62], h < 8 ? .3 : .02);
+        o.fillRect(x, base-h, 2, h);
+        if (arms){ o.fillRect(x-3, base-h+5, 3, 1); o.fillRect(x-3, base-h+2, 1, 3); o.fillRect(x+2, base-h+7, 3, 1); o.fillRect(x+4, base-h+3, 1, 4); }
+        if (WX.snow > .3){ o.fillStyle = shade([240,244,252],0); o.fillRect(x, base-h-1, 2, 1); } }
+      // virevoltant poussé par le vent
+      if (!S.tw && WX.wind > 12 && Math.random() < dt*.15) S.tw = {x: WX.dirE > 0 ? -4 : VW+4, b:0};
+      if (S.tw){ const w = S.tw; w.x += WX.dirE*(6 + WX.wind*.5)*dt; w.b += dt*6;
+        const xi = Math.round(w.x), gy = S.d2[clamp(xi,0,VW-1)] - 3 - Math.abs(Math.round(Math.sin(w.b)*3));
+        o.fillStyle = shade([150,112,70], .02); circle(xi, gy, 2); o.fillStyle = shade([110,80,50], .02); o.fillRect(xi-1+Math.round(Math.sin(w.b*2)), gy, 1, 1);
+        if (xi < -6 || xi > VW+6) S.tw = null; }
+      // mirage de chaleur
+      if (E.light > .85 && WX.cloud < .5 && !WX.rain){
+        for (let y=HY-1; y<HY+7; y++) o.drawImage(off, 0, y, VW, 1, Math.round(Math.sin(t*5 + y*1.3)*1), y, VW, 1); }
+    }
+  },
+
+  // ---------- FORÊT : grands arbres, fougères, rayons, lucioles ----------
+  foret: {
+    gen(){
+      const r = rng(61);
+      S.far = ridge(62, HY-4, 10, .08, 3);
+      S.mid = []; for (let x=-4; x<VW+4; x += 7+Math.floor(r()*6)) S.mid.push([x, HY-6+Math.floor(r()*12), 6+Math.floor(r()*4), r()]);
+      S.ground = ridge(63, VH-9, 3, .05, 2);
+      S.trunks = [[Math.round(VW*.07), 8], [Math.round(VW*.9), 10], [Math.round(VW*.58), 5]];
+      S.ferns = []; for (let x=0;x<VW;x+=3+Math.floor(r()*4)) S.ferns.push([x, 3+Math.floor(r()*4), r()]);
+      S.mush = [[Math.round(VW*.3),0],[Math.round(VW*.33),1],[Math.round(VW*.68),0]];
+      S.ff = []; for (let i=0;i<26;i++) S.ff.push({x:r()*VW, y:HY-10+r()*30, p:r()*6, vx:0, vy:0});
+      S.lv = [];
+    },
+    draw(t, dt){
+      // lisière lointaine
+      lineFill(S.far, [70,104,84], .62); snowCap(S.far, .6, 2);
+      // arbres du milieu
+      for (const [x, y, rr, s] of S.mid){ const sw = Math.round(Math.sin(t*(.9+WX.wind*.03)+x)*clamp(WX.wind/30,.1,1.5));
+        o.fillStyle = shade([66,50,40], .35); o.fillRect(x, y, 2, VH-y);
+        o.fillStyle = shade(s < .5 ? [52,94,64] : [76,104,58], .35); circle(x+1+sw, y-rr+2, rr);
+        o.fillStyle = shade(s < .3 ? [160,110,60] : [96,132,72], .35); circle(x-1+sw, y-rr, Math.max(2, rr-4));
+        if (WX.snow > .3){ o.fillStyle = shade([240,244,252], .3); o.fillRect(x-rr+3+sw, y-2*rr+2, rr*2-4, 1); } }
+      // rayons de lumière
+      if (E.light > .7 && WX.cloud < .6 && !WX.rain){
+        for (let i=0;i<4;i++){ const x0 = VW*(.15+i*.22) + Math.sin(t*.2+i)*6, a = .05 + .03*Math.sin(t*.5+i*2);
+          o.fillStyle = css([255,244,200], a*(1-WX.cloud)); for (let y=0;y<VH;y+=1) o.fillRect(Math.round(x0 + y*.45), y, 5, 1); } }
+      // sol, fougères, champignons
+      lineFill(S.ground, [52,72,44], .03); snowCap(S.ground, 0);
+      for (const [x, h, s] of S.ferns){ const gy = S.ground[Math.min(VW-1,x)], sw = windSway(t, x, .8);
+        o.fillStyle = shade(s < .5 ? [74,120,60] : [96,138,66], .02);
+        for (let k=0;k<h;k++){ o.fillRect(x + Math.round(sw*k/h), gy-k, 1, 1); if (k%2===0 && k>0){ o.fillRect(x-1+Math.round(sw*k/h)-Math.floor(k/3), gy-k+1, 1, 1); o.fillRect(x+1+Math.round(sw*k/h)+Math.floor(k/3), gy-k+1, 1, 1); } } }
+      for (const [x, k] of S.mush){ const gy = S.ground[x]; o.fillStyle = shade([230,220,200], .02); o.fillRect(x, gy-2, 1, 2);
+        o.fillStyle = shade(k ? [210,150,80] : [200,60,50], .02); o.fillRect(x-1, gy-3, 3, 1); o.fillRect(x, gy-4, 1, 1);
+        if (!k){ o.fillStyle = shade([250,250,250], .02); o.fillRect(x-1, gy-3, 1, 1); } }
+      // grands troncs au premier plan (cadrage)
+      for (const [x, w] of S.trunks){ o.fillStyle = shade([58,44,36], 0); o.fillRect(x, 0, w, VH);
+        o.fillStyle = shade([80,62,48], 0); for (let y=(x*3)%5; y<VH; y+=5) o.fillRect(x+1+((y*7)%(w-2)), y, 1, 3);
+        o.fillStyle = shade([40,30,26], 0); o.fillRect(x+w-1, 0, 1, VH);
+        o.fillStyle = shade([70,110,60], 0); o.fillRect(x+1, 30 + (x%9), 2, 2); }
+      // feuilles d'automne qui tombent
+      if (!WX.snow && S.lv.length < 6 + WX.wind*.3 && Math.random() < dt*(1 + WX.wind*.05)) S.lv.push({x:Math.random()*VW, y:-2, p:Math.random()*6, c:Math.random()<.5?[210,120,50]:[190,160,60]});
+      for (let i=S.lv.length-1;i>=0;i--){ const l = S.lv[i]; l.y += 5*dt; l.x += (Math.sin(t*2+l.p)*6 + WX.dirE*WX.wind*.4)*dt;
+        if (l.y > VH){ S.lv.splice(i,1); continue; } o.fillStyle = shade(l.c, .1); o.fillRect(Math.round(l.x), Math.round(l.y), 1, 1); }
+      // lucioles la nuit
+      if (E.night > .4 && !WX.rain && !WX.snow) for (const f of S.ff){
+        f.vx += (Math.random()-.5)*8*dt; f.vy += (Math.random()-.5)*8*dt; f.vx *= .97; f.vy *= .97;
+        f.x += f.vx*dt*4; f.y += f.vy*dt*4; if (f.x<0) f.x+=VW; if (f.x>VW) f.x-=VW; f.y = clamp(f.y, HY-15, VH-4);
+        const a = Math.max(0, Math.sin(t*2 + f.p*5))*E.night;
+        o.fillStyle = `rgba(220,255,120,${a*.25})`; o.fillRect(Math.round(f.x)-1, Math.round(f.y)-1, 3, 3);
+        o.fillStyle = `rgba(240,255,170,${a})`; o.fillRect(Math.round(f.x), Math.round(f.y), 1, 1); }
+    }
+  }
+
+};
+
+// ================= Ciel, astres, nuages =================
+const BAYER = [0,8,2,10,12,4,14,6,3,11,1,9,15,7,13,5];
+function buildSky(){
+  if (!skyImg || skyImg.width !== VW) skyImg = o.createImageData(VW, VH);
+  const d = skyImg.data, step = 9;
+  for (let y=0;y<VH;y++){ const f = Math.pow(Math.min(1, y/(HY+6)), 1.15), c = mix(E.top, E.bot, f);
+    for (let x=0;x<VW;x++){ const b = (BAYER[(y&3)*4+(x&3)]/16 - .5)*step, i = (y*VW+x)*4;
+      d[i] = clamp(Math.round((c[0]+b)/step)*step,0,255); d[i+1] = clamp(Math.round((c[1]+b)/step)*step,0,255); d[i+2] = clamp(Math.round((c[2]+b)/step)*step,0,255); d[i+3] = 255; } }
+}
+let stars = [], clouds = [], birds = [], drops = [], flakes = [], leaves = [], shoot = null, flash = 0, bolt = null, nextBolt = 3, nextBird = 2;
+function genSky(){
+  const r = rng(77); stars = [];
+  for (let i=0;i<Math.round(VW*.35);i++) stars.push([Math.floor(r()*VW), Math.floor(r()*(HY-6)), r()*6.28, r()<.15]);
+  clouds = [];
+  for (let i=0;i<14;i++){ const w = 10+Math.floor(r()*22), h = 4+Math.floor(r()*5), rows = [];
+    for (let y=0;y<h;y++){ const f = y/(h-1), hw = w/2 * Math.sqrt(1 - Math.pow((1-f)*.9,2)) * (.75+r()*.25); rows.push([Math.round(w/2 - hw + (r()-.5)*2), Math.round(hw*2)]); }
+    clouds.push({x:r()*(VW+40)-20, y:4 + r()*(HY-26), w, rows, sp:.6+r()*.8, k:i}); }
+}
+function drawSun(){
+  if (!E.sun) return;
+  const {x, y, low} = E.sun, a = 1 - WX.cloud*.75;
+  if (a < .05) return;
+  const core = mix([255,248,214],[255,150,80],Math.pow(low,1.5));
+  for (let r=13; r>5; r-=2){ o.fillStyle = css(core, .05*a); circle(x, y, r); }
+  o.fillStyle = css(core, a); circle(x, y, 4);
+  o.fillStyle = css([255,255,240], a*.8); o.fillRect(Math.round(x-2), Math.round(y-2), 2, 1);
+}
+function moonPhase(){ const syn = 29.530588, ref = Date.UTC(2000,0,6,18,14); return (((Date.now()-ref)/864e5 % syn)+syn)%syn/syn; }
+function drawMoon(){
+  if (!E.moon) return;
+  const {x, y} = E.moon, a = E.night*(1 - WX.cloud*.7); if (a < .05) return;
+  o.fillStyle = css([220,228,255], .06*a); circle(x, y, 9);
+  const ph = moonPhase(), r = 4;
+  for (let dy=-r; dy<=r; dy++){ const w = Math.floor(Math.sqrt(r*r - dy*dy + r*.6));
+    for (let dx=-w; dx<=w; dx++){ // terminateur
+      const nx = dx / (w||1), tt = Math.cos(ph*2*Math.PI);
+      const litPx = ph < .5 ? nx > tt : nx < -tt;
+      o.fillStyle = litPx ? css([236,238,250], a) : css([60,66,100], a*.35);
+      o.fillRect(Math.round(x+dx), Math.round(y+dy), 1, 1); } }
+}
+function drawStars(t, dt){
+  const a0 = E.night * (1 - WX.cloud*.92); if (a0 < .03) return;
+  for (const [x,y,p,big] of stars){ const a = a0*(.45 + .55*Math.sin(t*(1.5+p*.3)+p*7));
+    o.fillStyle = css([255,255,240], clamp(a,0,1)); o.fillRect(x,y,1,1);
+    if (big && a > .7){ o.fillStyle = css([255,255,240], a*.3); o.fillRect(x-1,y,3,1); o.fillRect(x,y-1,1,3); } }
+  if (!shoot && Math.random() < dt*.04*a0) shoot = {x:Math.random()*VW*.7+VW*.1, y:Math.random()*18+4, l:0};
+  if (shoot){ shoot.l += dt*2.2; const len = 10;
+    for (let i=0;i<len;i++){ o.fillStyle = css([255,255,255], (1-i/len)*(1-shoot.l)*a0); o.fillRect(Math.round(shoot.x+shoot.l*40-i), Math.round(shoot.y+(shoot.l*40-i)*.45), 1, 1); }
+    if (shoot.l >= 1) shoot = null; }
+}
+function drawClouds(t, dt){
+  const n = Math.round(WX.cloud*14); if (!n) return;
+  const rainy = clamp(WX.rain + WX.storm*.4 + WX.snow*.2, 0, 1);
+  const base = mix([248,250,255],[132,138,152],rainy);
+  const lightC = mix(mul(base, E.amb), base, .2), k = .25 + .75*E.light;
+  const topC = css(scl(mix(lightC,[255,255,255],.15), k)), midC = css(scl(lightC, k*.93)), botC = css(scl(mix(lightC, E.top, .35), k*.82));
+  const v = WX.dirE*(.8 + WX.wind*.09);
+  for (let i=0;i<n;i++){ const c = clouds[i];
+    c.x += v*c.sp*dt; if (c.x > VW+c.w) c.x = -c.w-4; if (c.x < -c.w-6) c.x = VW+2;
+    const y0 = Math.round(c.y + (rainy > .5 ? -c.y*.4 : 0)), x0 = Math.round(c.x);
+    c.rows.forEach(([ox, w], j) => { o.fillStyle = j === 0 ? topC : j >= c.rows.length-2 ? botC : midC; o.fillRect(x0+ox, y0+j, w, 1); });
+  }
+  if (WX.cloud > .85){ o.fillStyle = css(scl(lightC, k*.85), .35 + rainy*.3); o.fillRect(0,0,VW,6); }
+}
+function drawBirds(t, dt){
+  if (E.light < .6 || WX.rain > .15 || WX.storm || WX.snow > .2) { birds = []; return; }
+  nextBird -= dt;
+  if (nextBird <= 0){ nextBird = 10 + Math.random()*14; const n = 3+Math.floor(Math.random()*3), y = 8+Math.random()*24, dir = Math.random()<.5?1:-1;
+    for (let i=0;i<n;i++) birds.push({x: dir>0 ? -6-i*5 : VW+6+i*5, y:y+((i%2)?3:0)+i, v:(7+Math.random()*2)*dir, p:Math.random()*6}); }
+  o.fillStyle = css(scl([40,40,55], .5+.5*E.light));
+  for (let i=birds.length-1;i>=0;i--){ const b = birds[i]; b.x += b.v*dt; b.y += Math.sin(t*2+b.p)*.05;
+    if (b.x < -20 || b.x > VW+20){ birds.splice(i,1); continue; }
+    const up = Math.sin(t*9+b.p) > 0, x = Math.round(b.x), y = Math.round(b.y);
+    o.fillRect(x,y,1,1); o.fillRect(x-1, y-(up?1:0), 1, 1); o.fillRect(x+1, y-(up?1:0), 1, 1);
+    if (up){ o.fillRect(x-2, y-1, 1, 1); o.fillRect(x+2, y-1, 1, 1); } }
+}
+function drawPrecip(t, dt){
+  // pluie
+  const target = Math.round(WX.rain * VW * .9);
+  while (drops.length < target) drops.push({x:Math.random()*VW, y:Math.random()*VH, v:70+Math.random()*40, s:0});
+  if (drops.length > target) drops.length = target;
+  const slant = WX.dirE * WX.wind * .9;
+  const rc = mix([170,190,220], E.amb, .3);
+  for (const d of drops){
+    if (d.s > 0){ d.s -= dt; o.fillStyle = css(rc, .5); o.fillRect(Math.round(d.x)-1, Math.round(d.y), 1, 1); o.fillRect(Math.round(d.x)+1, Math.round(d.y), 1, 1);
+      if (d.s <= 0){ d.y = -4; d.x = Math.random()*VW; d.floor = HY + Math.random()*(VH-HY); } continue; }
+    d.y += d.v*dt; d.x += slant*dt; if (d.x > VW) d.x -= VW; if (d.x < 0) d.x += VW;
+    if (d.floor && d.y >= d.floor){ d.s = .08; continue; }
+    if (d.y > VH){ d.y = -4; d.x = Math.random()*VW; d.floor = HY + Math.random()*(VH-HY); }
+    o.fillStyle = css(rc, .55 + .25*E.light);
+    o.fillRect(Math.round(d.x), Math.round(d.y), 1, 2 + (d.v > 95 ? 1 : 0));
+  }
+  // neige
+  const ts = Math.round(WX.snow * VW * .8);
+  while (flakes.length < ts) flakes.push({x:Math.random()*VW, y:Math.random()*VH, v:5+Math.random()*7, p:Math.random()*6, b:Math.random()<.2});
+  if (flakes.length > ts) flakes.length = ts;
+  o.fillStyle = css([248,250,255], .9);
+  for (const f of flakes){ f.y += f.v*dt; f.x += (Math.sin(t*1.3+f.p)*4 + WX.dirE*WX.wind*.35)*dt;
+    if (f.y > VH){ f.y = -2; f.x = Math.random()*VW; } if (f.x > VW) f.x -= VW; if (f.x < 0) f.x += VW;
+    o.fillRect(Math.round(f.x), Math.round(f.y), f.b?2:1, f.b?2:1); }
+  // feuilles au vent fort
+  if (WX.wind > 28 && !WX.snow && Math.random() < dt*WX.wind*.04) leaves.push({x: WX.dirE>0 ? -2 : VW+2, y: HY - 10 + Math.random()*30, p:Math.random()*6, c:Math.random()<.5?[200,120,50]:[150,170,70]});
+  for (let i=leaves.length-1;i>=0;i--){ const l = leaves[i]; l.x += WX.dirE*(WX.wind*.9)*dt; l.y += Math.sin(t*4+l.p)*12*dt + 2*dt;
+    if (l.x < -4 || l.x > VW+4 || l.y > VH){ leaves.splice(i,1); continue; }
+    o.fillStyle = shade(l.c, 0); o.fillRect(Math.round(l.x), Math.round(l.y), Math.sin(t*8+l.p) > 0 ? 2 : 1, 1); }
+}
+function drawFog(t){
+  if (!WX.fog && WX.cloud < .95 && !WX.rain) return;
+  const k = WX.fog ? 1 : .35, c = mix(E.bot, [200,205,215], .3);
+  for (let i=0;i<5;i++){ const y = HY - 8 + i*7, sh = Math.sin(t*.15 + i*1.7)*20;
+    o.fillStyle = css(c, .13*k); o.fillRect(Math.round(-20+sh), y, VW+40, 4 + (i%2)); }
+  if (WX.fog){ o.fillStyle = css(c, .22); o.fillRect(0, 0, VW, VH); }
+}
+function drawStorm(t, dt){
+  if (!WX.storm) return;
+  nextBolt -= dt;
+  if (nextBolt <= 0){ nextBolt = 3 + Math.random()*7; flash = 1;
+    let x = 20 + Math.random()*(VW-40), y = 4; bolt = [];
+    while (y < HY+6){ bolt.push([Math.round(x), y]); x += Math.round((Math.random()-.5)*4); y += 1 + Math.floor(Math.random()*2); } }
+  if (flash > 0){
+    if (flash > .7 && bolt){ o.fillStyle = '#fffbe6'; for (const [x,y] of bolt){ o.fillRect(x,y,1,1); } }
+    o.fillStyle = `rgba(230,235,255,${flash*.35})`; o.fillRect(0,0,VW,VH);
+    flash -= dt*(flash > .6 ? 4 : 2.5); if (flash > .2 && flash < .3 && Math.random() < .3) flash = .8;
+  }
+}
+
+// ================= Texte =================
+const $ = id => document.getElementById(id);
+let tickItems = [], tickI = 0, tickT = 0;
+function updateText(force){
+  if (!DATA) return;
+  const c = DATA.cur, d0 = DATA.daily[0], now = nowMin(), nd = new Date();
+  $('city').textContent = CITY;
+  $('date').textContent = `${DAYS[nd.getDay()]} ${nd.getDate()} ${MONTHS[nd.getMonth()]}` + (OFFLINE ? ' · HORS LIGNE' : DEMO ? ' · DÉMO' : '');
+  $('temp').textContent = `${Math.round(c.temp)}°`;
+  $('cond').textContent = LABEL(c.code);
+  $('feels').textContent = `RESSENTI ${Math.round(c.feels)}°`;
+  // infos défilantes
+  const items = [];
+  items.push(`VENT ${Math.round(c.wind)} KM/H ${CARD(c.dir)}` + (c.gust > c.wind + 15 ? ` · RAFALES ${Math.round(c.gust)}` : ''));
+  const next = DATA.hourly.slice(1, 13).find(h => h.pp >= 50);
+  items.push(WX.rain > .2 || WX.snow > .2 ? `${WX.snow ? 'NEIGE' : 'PLUIE'} EN COURS · ${d0.pp}% AUJOURD'HUI` : next ? `PLUIE PROBABLE VERS ${next.h}H` : `PAS DE PLUIE AVANT 12H`);
+  const sr = d0.sr, ss = d0.ss;
+  items.push(now < sr ? `GOLDEN HOUR À ${fmt(sr)}` : now < sr+60 ? `GOLDEN HOUR EN COURS` : now < ss-60 ? `GOLDEN HOUR DANS ${dur(ss-60-now)}` :
+             now < ss ? `GOLDEN HOUR EN COURS` : now < ss+35 ? `BLUE HOUR EN COURS` : `GOLDEN HOUR DEMAIN ${fmt(DATA.daily[1] ? DATA.daily[1].sr : sr)}`);
+  items.push(`LEVER ${fmt(sr)} · COUCHER ${fmt(ss)}`);
+  items.push(`MAX ${Math.round(d0.max)}° · MIN ${Math.round(d0.min)}°`);
+  items.push(`HUMIDITÉ ${Math.round(c.hum)}% · UV ${Math.round(d0.uv ?? 0)}`);
+  tickItems = items;
+  if (force){ $('tick').textContent = items[tickI % items.length]; }
+}
+function stepTicker(dt){
+  tickT += dt;
+  if (tickT > 4.2){ tickT = 0; const el = $('tick'); el.style.opacity = 0;
+    setTimeout(() => { tickI = (tickI+1) % tickItems.length; el.textContent = tickItems[tickI]; el.style.opacity = 1; }, 320); }
+}
+
+// ================= Semaine (survol) =================
+function drawIcon(cvs, type){
+  const g = cvs.getContext('2d'); g.clearRect(0,0,16,16);
+  const P = (x,y,w,h,c) => { g.fillStyle = c; g.fillRect(x,y,w,h); };
+  const disc = (x0,y0,r,c) => { g.fillStyle = c; for (let y=-r;y<=r;y++){ const w = Math.floor(Math.sqrt(r*r-y*y+r*.6)); g.fillRect(x0-w, y0+y, w*2+1, 1); } };
+  const sun = (x,y,r) => { disc(x,y,r,'#ffd23f'); g.fillStyle='#ffd23f'; [[0,-1],[0,1],[-1,0],[1,0]].forEach(([a,b])=>P(x+a*(r+2),y+b*(r+2),1,1,'#ffd23f')); [[1,1],[-1,1],[1,-1],[-1,-1]].forEach(([a,b])=>P(x+a*(r+1),y+b*(r+1),1,1,'#ffb02e')); };
+  const cloud = (x,y,c1,c2) => { disc(x+4,y+4,3,c1); disc(x+8,y+3,4,c1); disc(x+11,y+5,3,c1); P(x+2,y+5,12,3,c1); P(x+2,y+8,12,1,c2); };
+  if (type === 'sun') sun(8,8,4);
+  else if (type === 'partly'){ sun(10,5,3); cloud(0,5,'#eef1f7','#a9b2c6'); }
+  else if (type === 'cloud'){ cloud(0,3,'#dfe4ee','#9aa3b8'); cloud(-1,5,'#eef1f7','#a9b2c6'); }
+  else if (type === 'rain'){ cloud(0,1,'#c9d0de','#8d97ad'); [[3,12],[7,11],[11,12],[5,14],[9,14]].forEach(([x,y])=>P(x,y,1,2,'#6fb4ff')); }
+  else if (type === 'snow'){ cloud(0,1,'#dfe4ee','#9aa3b8'); [[3,12],[7,11],[11,12],[5,14],[9,14],[13,14]].forEach(([x,y])=>P(x,y,1,1,'#ffffff')); }
+  else if (type === 'storm'){ cloud(0,1,'#8d93a6','#5d6378'); P(8,10,2,1,'#ffd23f'); P(7,11,2,1,'#ffd23f'); P(6,12,4,1,'#ffd23f'); P(8,13,1,1,'#ffd23f'); P(7,14,1,1,'#ffd23f'); }
+  else if (type === 'fog'){ [[2,4,12],[0,7,14],[3,10,11],[1,13,13]].forEach(([x,y,w])=>P(x,y,w,1,'#c9d0de')); }
+}
+function buildWeek(){
+  $('wh').textContent = `LA SEMAINE · ${CITY}`;
+  const wg = $('wg'); wg.innerHTML = '';
+  DATA.daily.slice(0,7).forEach((d,i) => {
+    const el = document.createElement('div'); el.className = 'd' + (i===0 ? ' today' : '');
+    const icv = document.createElement('canvas'); icv.width = icv.height = 16; drawIcon(icv, ICON(d.code)); icv.style.animationDelay = (i*.2)+'s';
+    el.innerHTML = `<div class="dn">${i===0 ? 'AUJ' : DAYS[d.date.getDay()]}</div>`;
+    el.appendChild(icv);
+    el.insertAdjacentHTML('beforeend', `<div class="mx">${Math.round(d.max)}°</div><div class="mn">${Math.round(d.min)}°</div><div class="pp">${d.pp ?? 0}%</div>`);
+    wg.appendChild(el);
+  });
+}
+W.addEventListener('click', () => W.classList.toggle('open'));
+W.addEventListener('mouseleave', () => W.classList.remove('open'));
+
+// ================= Taille / boucle =================
+let SCENE = null;
+function pickScene(){
+  const q = Q.get('scene'); if (q && SC[q]) return q;
+  const d = new Date();
+  const days = Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5);
+  const dow = (d.getDay() + 6) % 7;                 // lundi = 0 … dimanche = 6
+  const week = Math.floor((days + 3) / 7);           // n° de semaine (lundi → dimanche)
+  return weekOrder(week)[dow];
+}
+// Ordre mélangé, différent chaque semaine : les 7 paysages passent une fois chacun.
+function baseOrder(w){ const r = rng(w*7919 + 13), a = SCENES.slice();
+  for (let i=a.length-1;i>0;i--){ const j = Math.floor(r()*(i+1)); [a[i],a[j]] = [a[j],a[i]]; } return a; }
+// Le lundi ne reprend jamais le paysage du dimanche précédent
+// (l'échange ne touche jamais le dimanche, donc la règle reste vraie d'une semaine à l'autre).
+function weekOrder(w){ const a = baseOrder(w), prevSun = baseOrder(w-1)[6];
+  if (a[0] === prevSun){ const j = 1 + (w % 5); [a[0],a[j]] = [a[j],a[0]]; } return a; }
+function resize(){
+  const w = W.clientWidth, h = W.clientHeight, dpr = Math.min(devicePixelRatio||1, 3);
+  P = h / VH; VW = Math.max(80, Math.round(w / P)); HY = 58;
+  off.width = VW; off.height = VH;
+  cv.width = Math.round(w*dpr); cv.height = Math.round(h*dpr);
+  document.documentElement.style.setProperty('--p', Math.min(P, w/150) + 'px');
+  SCENE = pickScene(); for (const k in S) delete S[k]; smoke = [];
+  SC[SCENE].gen(); genSky(); skyAge = 99;
+}
+addEventListener('resize', resize);
+
+let last = performance.now()/1000, T = 0, textT = 0;
+function loop(){
+  const now = performance.now()/1000, dt = Math.min(.1, now-last);
+  if (dt >= 1/32 && DATA){
+    last = now; T += dt;
+    computeEnv();
+    skyAge += dt; if (skyAge > .5){ buildSky(); skyAge = 0; }
+    o.putImageData(skyImg, 0, 0);
+    drawStars(T, dt); drawSun(); drawMoon(); drawClouds(T, dt); drawBirds(T, dt);
+    SC[SCENE].draw(T, dt);
+    drawFog(T); drawPrecip(T, dt); drawStorm(T, dt);
+    cx.imageSmoothingEnabled = false;
+    cx.clearRect(0,0,cv.width,cv.height);
+    cx.drawImage(off, 0, 0, cv.width, cv.height);
+    textT += dt; if (textT > 20){ textT = 0; updateText(); }
+    stepTicker(dt);
+  } else if (!DATA) last = now;
+  requestAnimationFrame(loop);
+}
+resize();
+load(); setInterval(load, 15*60*1000);
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
